@@ -1,0 +1,36 @@
+{
+  "version": "2.0.0",
+  "retrieval": {
+    "top_k": 6,
+    "min_score": 2.0,
+    "min_moderate_score": 3.0,
+    "chunk_chars": 1000,
+    "quote_chars": 400,
+    "max_questions": 20,
+    "cjk_unigram_weight": 0.45,
+    "cjk_bigram_weight": 1.6,
+    "filename_boost": 0.5,
+    "section_boost": 0.6
+  },
+  "caps": {
+    "max_files": 2000,
+    "max_file_bytes": 4000000,
+    "max_text_chars": 2000000,
+    "max_total_chars": 20000000,
+    "max_chunks": 200000
+  },
+  "status": {
+    "success": "all questions have above-threshold evidence, no conflicts, no read errors",
+    "partial": "some question/filter/file failed but index and evidence remain usable",
+    "insufficient_input": "no readable text was indexed",
+    "failed": "case.json missing or invalid"
+  },
+  "discipline": {
+    "answer_mode": "extractive_only",
+    "source_mutation": "none",
+    "unknown_contract_fields": "structured cannot_determine object",
+    "conflicts": "quote both sides and do not arbitrate",
+    "duplicates": "sha256 based, first occurrence is indexed",
+    "version_relations": "filename and metadata labels only, not semantic diffs"
+  }
+}
