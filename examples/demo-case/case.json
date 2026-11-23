@@ -1,0 +1,24 @@
+{
+  "case_id": "demo-lab-kb-001",
+  "questions": [
+    {
+      "id": "q1",
+      "question": "What buffer recipe was used in the 2021 notes?"
+    },
+    {
+      "id": "q2",
+      "question": "At what centrifuge speed was plasma separated?"
+    }
+  ],
+  "output_contract": {
+    "answers": "array of per-question answers with citations",
+    "citations": "array of locatable passage citations",
+    "supporting_passages": "array of ranked passages",
+    "evidence_gaps": "array of questions without above-threshold evidence",
+    "conflicts": "array of conflicting numeric claims",
+    "index": "object or array describing indexed files",
+    "versions": "array of version groups",
+    "duplicates": "array of duplicate files",
+    "status": "one of success/partial/insufficient_input/failed"
+  }
+}
