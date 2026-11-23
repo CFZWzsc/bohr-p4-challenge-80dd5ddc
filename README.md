@@ -9,7 +9,7 @@ answers, private data or credentials are included.
 ## Skill
 
 - Name: `research-kb-evidence-qa`
-- Summary: Use when a research-library case asks a question over a local multi-file knowledge base and requires sourced answers, passage back-links, conflict or gap reporting; run scripts/run_skill.py for a deterministic extractive result.json.
+- Summary: Use when a research-library case asks a question over a local multi-file knowledge base and requires sourced answers, passage back-links, and conflict or gap reporting; runs scripts/run_skill.py for a deterministic extractive result.json that keeps case_id and every output_contract field, with honest status.
 
 ## Contents
 
