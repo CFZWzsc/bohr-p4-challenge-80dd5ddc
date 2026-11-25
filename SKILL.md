@@ -13,7 +13,8 @@ description: Use when a research-library case supplies local files plus question
 2. 识别**重复文件**（sha256）与**版本关系**（文件名/元数据中的年份、v1/v2、revision、final 等标签）。
 3. 把每个问题转成检索查询，跨文件召回段落（ASCII 词 + 中文单字/二元组，tf-idf）。
 4. 用**原文片段**拼出回答，每条片段给出文件、章节、行号、字符区间、片段哈希。
-5. 对没有依据的问题明确写「知识库中没有依据」，列出缺失词；对同单位数值不一致的段落并列引用、不裁决。
+5. 对没有依据的问题明确写「知识库中没有依据」，列出缺失词；对同题不同文件同一量的数值差异、以及 room temperature 与显式温度设定并置，写入 `conflicts`（`left`/`right` 各含文件、原文、值），并列引用、不裁决；无缺口/冲突时写 `[]`。
+6. 问题含年份时优先该年份文件；引用其他版本在每条 citation 标注 `version_label` 并在答案中显式注明，年份约束未满足则 `status=partial`。
 6. 输出 `result.json`，覆盖输入 `output_contract` 的每一个键，并给出 `status`、`uncertainty`、`errors`、`stats` 与运行记录。
 
 本 Skill **只做抽取式回答**：答案由原文片段组成，不补充知识库之外的论断。
@@ -78,10 +79,10 @@ Windows 注意：`--out` 指到已存在的目录时，脚本会写入该目录�
 | `status` | `success` / `partial` / `insufficient_input` / `failed` |
 | `answers` | 逐问题结果：答案、置信度、引用标签、支撑段落、缺失词 |
 | `answer` | 第一个问题的答案（兼容单问题契约） |
-| `citations` | 可定位引用：`label`、`file`、`section`、`page`、`line_start/line_end`、`char_start/char_end`、`quote`、`quote_sha256` |
+| `citations` | 可定位引用：`label`、`file`、`section`、`page`、`line_start/line_end`、`char_start/char_end`、`quote`、`quote_sha256`、`version_label`、`version_year` |
 | `supporting_passages` | 排序后的段落：分数、命中词、坐标、引用标签 |
 | `evidence_gaps` | 无依据问题：缺失词与原因 |
-| `conflicts` | 同单位数值冲突：双方引用、数值、单位，不裁决 |
+| `conflicts` | 同题段落同一量的数值或温度条件冲突：`question_id`、`quantity`、`unit`、`left/right`（`file`/`quote`/`value`）、`resolution`；无冲突为 `[]` |
 | `confidence` | `moderate_lexical_support` / `low_lexical_support` / `no_evidence` / `no_question` / `no_material` |
 | `index` | 文件清单：哈希、字节、字符、编码、权限、年份、版本标签；重复文件单独标记 |
 | `versions` | 版本组：成员、年份/版本标签、是否内容不同 |
@@ -106,7 +107,7 @@ Windows 注意：`--out` 指到已存在的目录时，脚本会写入该目录�
 5. **分块**：按空行分块，识别 Markdown、编号、中文序号标题；超长块按 1000 字符切分；记录章节、行号、字符区间。
 6. **召回**：查询与段落做 ASCII 词 + CJK 单字/二元组；tf-idf 打分，加分文件名与章节命中；低于阈值判为无依据。
 7. **回答**：每个问题取前 6 段，选与查询重合最高且含数值的句子作为引用片段；答案只拼接原文片段并附 `[S#]`。
-8. **缺证与冲突**：查询词在语料中零命中 → `evidence_gaps`；同一内容词下同单位数值不同 → `conflicts`，双方原文并列。
+8. **缺证与冲突**：查询词在语料中零命中 → `evidence_gaps`（无缺口写 `[]`）；同题不同文件同一量数值不同，或 room temperature 与显式温度点并置 → `conflicts`，双方原文并列；问题含年份时优先该年份文件，其他版本引用带 `version_label`，年份约束未满足则 `status=partial`。
 9. **确定性**：所有排序带稳定次级键；不使用随机数、时间戳或机器绝对路径。
 
 ## 证据要求
@@ -126,7 +127,8 @@ Windows 注意：`--out` 指到已存在的目录时，脚本会写入该目录�
 | 知识库为空 / 无可读文本 | 空索引 + `no_material` 说明 | `insufficient_input` |
 | 无问题字段 | 只返回索引，`confidence=no_question` | `partial` |
 | 某问题零命中或低分 | 回答「没有依据」，写入 `evidence_gaps` | `partial` |
-| 同单位数值冲突 | 双方原文并列，写入 `conflicts` | `partial` |
+| 同单位数值或温度条件冲突 | 双方原文并列，写入 `conflicts`（`condition_conflict` 或 `numeric_value_conflict`） | `partial` |
+| 年份约束未满足 | 引用其他版本并标注 `version_label`，选择该年份文件 | `partial` |
 | 文件不可读 / stat 失败 | 记入 `skipped`，其余文件继续 | `partial` |
 | 不支持扩展名 / 二进制 | 安全跳过，不影响其它文件 | 不降级 |
 | PDF 无文本层 / 解压失败 | 记 `empty_or_no_text_layer`，不伪造 | `partial` |
@@ -140,7 +142,7 @@ Windows 注意：`--out` 指到已存在的目录时，脚本会写入该目录�
 - 版本关系只依据文件名/元数据标签，不做语义 diff；同名不同目录不会归为同组。
 - 重复识别依据字节哈希，内容相同但编码不同的文件不会被判重。
 - PDF 抽取不保证阅读顺序与印刷页码。
-- 不做单位换算；冲突检测只比较相同单位下的数值。
+- 不做单位换算；冲突检测比较相同规范单位下的数值，并将 room temperature 与显式温度点记为 `condition_conflict`。
 - `answer` 是抽取式拼接，不是流畅的综述；执行 Agent 可以在不新增事实的前提下组织语言，但必须保留引用。
 
 ## 最小示例
