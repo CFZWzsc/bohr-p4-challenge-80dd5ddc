@@ -25,6 +25,7 @@ answers, private data or credentials are included.
 | `examples/demo-case/case.json` |
 | `examples/quickstart.md` |
 | `references/evidence-discipline.md` |
+| `references/gain-ablation.md` |
 | `references/method.md` |
 | `references/task-spec.md` |
 | `scripts/run_skill.py` |
