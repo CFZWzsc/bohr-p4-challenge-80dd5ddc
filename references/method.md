@@ -46,22 +46,23 @@ PDF 不解析页面对象，因此 `page=null`，行号也只对应抽取文本�
 ## 6. 缺证与冲突
 
 - 缺证：查询 token 在全部语料中零命中，或最高分低于阈值 → `evidence_gaps`，列出 `missing_terms`。
-- 冲突：两段证据共享至少一个内容词（长度 ≥4 或中文词），且**同一单位**下数值集合不同 → `conflicts`。
-- 单位解析：`mg/kg/g/mL/L/mM/µM/nM/min/h/day/%/°C` 以及 `pH`；`4 C` 与 `room temperature` 不会因为多一个数值而被判冲突。
-- 冲突只并列展示双方原文与数值，不取平均、不裁决；`resolution` 固定为 `not decided`。
+- 冲突：同题不同文件的两段证据在同一规范单位下数值集合不同，或一段为 `room temperature`、另一段为显式温度点 → `conflicts`；同一文档内部的段落不互相判冲突。
+- 单位解析：`mg/kg/g/mL/L/mM/µM/nM/min/h/day/%/°C` 以及 `pH`；保留 `mM`/`mm`、`mL`/`ml` 的大小写差异。
+- 冲突只并列展示双方原文与数值，不取平均、不裁决；`resolution` 为 `numeric_value_conflict` 或 `condition_conflict`。
 
 ## 7. 版本关系
 
 - 版本键 = 目录 + 文件名去掉年份/`v1`/`revision`/`final`/`draft`/`copy`/`backup` 后的首个词。
 - 同键且成员 ≥2 时输出 `versions` 组，记录每个成员的年份、版本标签、哈希、标题。
 - `distinct_content` 表示组内是否存在不同哈希；脚本不做语义 diff，`note` 明确说明这一点。
+- 问题含年份时检索加权该年份文件；每条 citation 带 `version_label`/`version_year`，引用其他版本会在答案中显式标注；没有任何该年份引用时 `status=partial`。
 
 ## 8. 状态判定
 
 | status | 条件 |
 |-|-|
 | `success` | 所有问题都有中等以上证据，无冲突、无不可读错误 |
-| `partial` | 任一问题无依据/低置信、存在冲突、不可读文件或运行错误 |
+| `partial` | 任一问题无依据/低置信、存在冲突、年份约束未满足、不可读文件或运行错误 |
 | `insufficient_input` | 没有可读材料 |
 | `failed` | `case.json` 缺失、损坏或非对象 |
 
