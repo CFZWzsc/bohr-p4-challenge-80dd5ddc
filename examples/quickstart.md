@@ -44,7 +44,7 @@ python scripts\sk_entry.py --input examples\demo-case --work .\demo-work --out .
 ```json
 {
   "case_id": "demo-lab-kb-001",
-  "status": "success",
+  "status": "partial",
   "answers": [
     {"question_id": "q1", "confidence": "moderate_lexical_support", "citations": ["S1", "S2"]},
     {"question_id": "q2", "confidence": "moderate_lexical_support", "citations": ["S3", "S4", "S5"]}
@@ -53,11 +53,16 @@ python scripts\sk_entry.py --input examples\demo-case --work .\demo-work --out .
                   "duplicate_of": "01_lab/2021-buffer-notes.md"}],
   "versions": [{"group": "01_lab/buffer", "members": 2, "distinct_content": true}],
   "evidence_gaps": [],
-  "conflicts": []
+  "conflicts": [
+    {"question_id": "q2", "quantity": "temperature", "unit": "°C",
+     "left": {"file": "01_lab/2021-buffer-notes.md", "value": "room temperature (approx. 20-25 °C)"},
+     "right": {"file": "01_lab/2022-buffer-revision.md", "value": "4 °C"},
+     "resolution": "condition_conflict"}
+  ]
 }
 ```
 
-实际行号、分数与引用条数以运行结果为准；上面只是字段示意。
+实际行号、分数、`version_label` 与引用条数以运行结果为准；上面只是字段示意。
 
 ## 4. 核对
 
@@ -80,4 +85,4 @@ Get-ChildItem -Recurse -Filter __pycache__
 | `duplicates` 有记录 | 文件字节相同 | 正常行为；重复文件不重复计分 |
 | `versions` 为空 | 文件名没有可识别的年份/版本主干 | 正常；版本分组只依据文件名与元数据 |
 | PDF 引用 `page` 为 `null` | 未解析页面对象 | 用 `line_start` 与 `quote` 复核 |
-| `status=partial` 且有 `conflicts` | 同单位数值不一致 | 人工核对原文，不要擅自裁决 |
+| `status=partial` 且有 `conflicts` | 同题段落数值或温度条件不一致 | 人工核对原文，不要擅自裁决 |
