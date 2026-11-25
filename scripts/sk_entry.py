@@ -460,6 +460,35 @@ def version_label(rel):
     return "; ".join(labels)
 
 
+VERSION_WORD_RE = re.compile(
+    r"(?i)(?<![a-z])(revision|rev|final|draft|copy|backup|old|new)(?![a-z])")
+
+
+def file_version_tag(rel):
+    """Short readable version label, e.g. 2021 / 2022-revision / unlabeled."""
+    stem = Path(rel).stem
+    years = sorted(set(YEAR_RE.findall(stem))) or sorted(set(YEAR_RE.findall(rel)))
+    words = []
+    for match in VERSION_WORD_RE.finditer(stem):
+        word = match.group(1).lower()
+        word = "revision" if word == "rev" else word
+        if word not in words:
+            words.append(word)
+    for marker, word in (("终稿", "final"), ("修订", "revision"),
+                         ("副本", "copy"), ("旧版", "old"), ("新版", "new")):
+        if marker in stem and word not in words:
+            words.append(word)
+    if years:
+        return years[0] + ("-" + "-".join(words) if words else "")
+    if words:
+        return "-".join(words)
+    return "unlabeled"
+
+
+def question_years(text):
+    return sorted(set(YEAR_RE.findall(text or "")))
+
+
 def version_key(rel):
     stem = Path(rel).stem.lower()
     stem = YEAR_RE.sub(" ", stem)
@@ -671,7 +700,8 @@ def cjk_weight(token, policy):
     return 1.0
 
 
-def rank_chunks(chunks, question, policy):
+def rank_chunks(chunks, question, policy, years=None):
+    years = years or []
     query_tokens = tokenize(question)
     if not query_tokens:
         return [], query_tokens, set()
@@ -701,6 +731,8 @@ def rank_chunks(chunks, question, policy):
             score += policy["retrieval"].get("filename_boost", 0.5)
         if section and any(token in section for token in query_tokens if len(token) > 2):
             score += policy["retrieval"].get("section_boost", 0.6)
+        if years and any(year in chunk["file"] for year in years):
+            score += policy["retrieval"].get("year_boost", 2.5)
         scored.append((round(score, 3), chunk, matched))
     scored.sort(key=lambda item: (-item[0], item[1]["file"],
                                   item[1]["line_start"], item[1]["char_start"]))
@@ -747,25 +779,86 @@ def pick_quote(chunk, query_tokens, policy):
     return quote, start, start + len(quote)
 
 
+TEMP_DEG_C_RE = re.compile(r"(?<![\w.])(-?\d+(?:\.\d+)?)\s*(?:°\s*C|C)(?![\w])")
+ROOM_TEMP_RE = re.compile(
+    r"(?i)\b(room\s+temperature|ambient\s+temperature|room\s+temp)\b")
+QUANTITY_BY_UNIT = {
+    "g": "mass", "mg": "mass", "kg": "mass", "Da": "molar_mass", "kDa": "molar_mass",
+    "mL": "volume", "µL": "volume", "L": "volume",
+    "min": "time", "h": "time", "day": "time", "s": "time",
+    "mm": "length", "cm": "length", "km": "length",
+    "mM": "concentration", "µM": "concentration", "nM": "concentration",
+    "pM": "concentration",
+    "°C": "temperature", "%": "percent", "pH": "pH",
+}
+
+
+def normalize_unit(raw_unit):
+    """Preserve case where it carries meaning (mM vs mm, mL vs ml, µM vs uM)."""
+    exact = {
+        "mM": "mM", "µM": "µM", "uM": "µM", "nM": "nM", "pM": "pM",
+        "mL": "mL", "ml": "mL", "µL": "µL", "uL": "µL", "L": "L",
+        "Da": "Da", "kDa": "kDa", "°C": "°C",
+    }
+    if raw_unit in exact:
+        return exact[raw_unit]
+    key = raw_unit.lower()
+    return {"minutes": "min", "minute": "min", "hours": "h", "hour": "h",
+            "days": "day", "day": "day", "sec": "s",
+            "seconds": "s", "second": "s"}.get(key, key)
+
+
 def measurements(text):
-    """Map unit -> set of values, so an extra unit in one passage is not a conflict."""
+    """Map canonical unit -> sorted values, so an extra unit is not a conflict."""
     found = {}
-    for value, unit in UNIT_RE.findall(text):
-        key = unit.lower()
-        key = {"minutes": "min", "minute": "min", "hours": "h", "hour": "h",
-               "days": "day", "day": "day", "sec": "s"}.get(key, key)
-        found.setdefault(key, set()).add(value)
+    for value, raw_unit in UNIT_RE.findall(text):
+        found.setdefault(normalize_unit(raw_unit), set()).add(value)
     for value in PH_RE.findall(text):
-        found.setdefault("ph", set()).add(value)
-    return {key: sorted(values) for key, values in found.items()}
+        found.setdefault("pH", set()).add(value)
+    for value in TEMP_DEG_C_RE.findall(text):
+        found.setdefault("°C", set()).add(value)
+    return {unit: sorted(values) for unit, values in found.items()}
 
 
-def shared_measurement_conflict(left_quote, right_quote):
+def quantity_of(unit):
+    return QUANTITY_BY_UNIT.get(unit, "quantity")
+
+
+def temperature_condition_conflict(left_quote, right_quote, left, right):
+    """room temperature (~20-25 °C) vs an explicit set-point is a condition conflict."""
+    left_room = bool(ROOM_TEMP_RE.search(left_quote))
+    right_room = bool(ROOM_TEMP_RE.search(right_quote))
+    if left_room and not left.get("°C") and not right_room and right.get("°C"):
+        return {
+            "unit": "°C", "quantity": "temperature", "resolution": "condition_conflict",
+            "left_value": "room temperature (approx. 20-25 °C)",
+            "right_value": ", ".join(right["°C"]) + " °C",
+        }
+    if right_room and not right.get("°C") and not left_room and left.get("°C"):
+        return {
+            "unit": "°C", "quantity": "temperature", "resolution": "condition_conflict",
+            "left_value": ", ".join(left["°C"]) + " °C",
+            "right_value": "room temperature (approx. 20-25 °C)",
+        }
+    return None
+
+
+def measurement_conflicts(left_quote, right_quote):
+    """Return real value/condition conflicts between two passages; [] when none."""
     left, right = measurements(left_quote), measurements(right_quote)
+    found = []
     for unit in sorted(set(left) & set(right)):
         if left[unit] != right[unit]:
-            return {"unit": unit, "left": left[unit], "right": right[unit]}
-    return None
+            found.append({
+                "unit": unit, "quantity": quantity_of(unit),
+                "resolution": "numeric_value_conflict",
+                "left_value": ", ".join(left[unit]),
+                "right_value": ", ".join(right[unit]),
+            })
+    condition = temperature_condition_conflict(left_quote, right_quote, left, right)
+    if condition:
+        found.append(condition)
+    return found
 
 
 def build_question_list(case, case_file, policy):
@@ -865,6 +958,14 @@ def make_evidence(payload, policy, policy_loaded, question_source):
     }
 
 
+def display(value):
+    """Render report cells without ever printing the string None."""
+    if value is None:
+        return "-"
+    text = str(value).strip()
+    return text if text else "-"
+
+
 def build_report(case_id, status, questions, answers, gaps, conflicts, stats, uncertainty):
     lines = [
         "# QA report (draft)",
@@ -874,44 +975,50 @@ def build_report(case_id, status, questions, answers, gaps, conflicts, stats, un
         "",
         "| field | value |",
         "|-|-|",
-        "| case_id | `%s` |" % case_id,
-        "| status | `%s` |" % status,
-        "| questions | %s |" % stats.get("questions", 0),
-        "| answered | %s |" % stats.get("answered", 0),
-        "| citations | %s |" % stats.get("citations", 0),
+        "| case_id | `%s` |" % display(case_id),
+        "| status | `%s` |" % display(status),
+        "| questions | %s |" % display(stats.get("questions", 0)),
+        "| answered | %s |" % display(stats.get("answered", 0)),
+        "| citations | %s |" % display(stats.get("citations", 0)),
         "",
         "## Answers",
         "",
     ]
     for item in answers:
-        lines.append("### %s: %s" % (item["question_id"], item["question"]))
+        lines.append("### %s: %s" % (display(item.get("question_id")), display(item.get("question"))))
         lines.append("")
         lines.append(item.get("answer") or "_No evidence found in the supplied knowledge base._")
         lines.append("")
         for citation in item.get("citations") or []:
             if isinstance(citation, str):
-                lines.append("- `%s`" % citation)
+                lines.append("- `%s`" % display(citation))
                 continue
-            lines.append("- `%s` %s L%s (%s)" % (
-                citation.get("label"), citation.get("file"),
-                citation.get("line_start"), citation.get("section") or "unsectioned"))
+            lines.append("- `%s` %s L%s (%s, version=%s)" % (
+                display(citation.get("label")), display(citation.get("file")),
+                display(citation.get("line_start")), display(citation.get("section")) if citation.get("section") else "unsectioned",
+                display(citation.get("version_label"))))
         lines.append("")
     lines.append("## Gaps and conflicts")
     lines.append("")
     if gaps:
         for gap in gaps:
-            lines.append("- gap `%s`: %s" % (gap.get("question_id"), gap.get("missing_terms")))
+            lines.append("- gap `%s`: question=%s; missing=%s; reason=%s" % (
+                display(gap.get("question_id")), display(gap.get("question")),
+                display(gap.get("missing_terms")), display(gap.get("reason"))))
     if conflicts:
         for conflict in conflicts:
-            lines.append("- conflict `%s`: %s vs %s" % (
-                conflict.get("question_id"),
-                conflict.get("left", {}).get("file") if isinstance(conflict.get("left"), dict) else None,
-                conflict.get("right", {}).get("file") if isinstance(conflict.get("right"), dict) else None))
+            left = conflict.get("left") if isinstance(conflict.get("left"), dict) else {}
+            right = conflict.get("right") if isinstance(conflict.get("right"), dict) else {}
+            lines.append("- conflict `%s` [%s %s / %s]: left %s = %s; right %s = %s" % (
+                display(conflict.get("question_id")), display(conflict.get("quantity")),
+                display(conflict.get("unit")), display(conflict.get("resolution")),
+                display(left.get("file")), display(left.get("value")),
+                display(right.get("file")), display(right.get("value"))))
     if not gaps and not conflicts:
         lines.append("- none recorded.")
     lines.append("")
     for note in uncertainty:
-        lines.append("- %s" % note)
+        lines.append("- %s" % display(note))
     lines.append("")
     return "\n".join(lines)
 
@@ -937,8 +1044,7 @@ def emergency_result(out_file, reason, input_raw, policy, policy_loaded):
         "answer": "The run failed before a grounded answer was produced.",
         "citations": [],
         "supporting_passages": [],
-        "evidence_gaps": [{"question_id": None, "missing_terms": [],
-                           "reason": reason}],
+        "evidence_gaps": [],
         "conflicts": [],
         "confidence": "failed",
         "index": [],
@@ -946,7 +1052,7 @@ def emergency_result(out_file, reason, input_raw, policy, policy_loaded):
         "duplicates": [],
         "skipped": [],
         "needs_human_confirmation": [{
-            "item": "run_failure", "locator": None, "reason": reason,
+            "item": "run_failure", "locator": "run", "reason": reason,
         }],
         "result": {"answer": "The run failed before a grounded answer was produced.",
                    "answers": [], "citations": []},
@@ -1041,9 +1147,12 @@ def run(args, policy, policy_loaded):
         status = "partial"
         confidence = "no_question"
 
+    year_unmet = []
     if status in ("success", "partial") and docs and questions:
         for question in questions:
-            ranked, query_tokens, corpus_tokens = rank_chunks(chunks, question["text"], policy)
+            wanted_years = question_years(question["text"])
+            ranked, query_tokens, corpus_tokens = rank_chunks(
+                chunks, question["text"], policy, wanted_years)
             missing = sorted(token for token in query_tokens if token not in corpus_tokens)[:12]
             question_citations, question_passages = [], []
             if not ranked or ranked[0][0] < policy["retrieval"].get("min_score", 2.0):
@@ -1059,6 +1168,9 @@ def run(args, policy, policy_loaded):
                 for rank, (score, chunk, matched) in enumerate(ranked, 1):
                     quote, quote_start, quote_end = pick_quote(chunk, query_tokens, policy)
                     doc = next(item for item in docs if item["file"] == chunk["file"])
+                    version_tag = file_version_tag(chunk["file"])
+                    version_year = (sorted(set(YEAR_RE.findall(Path(chunk["file"]).stem)))
+                                    or sorted(set(YEAR_RE.findall(chunk["file"]))))
                     char_start = chunk["char_start"] + quote_start
                     char_end = chunk["char_start"] + quote_end
                     citation = {
@@ -1073,6 +1185,8 @@ def run(args, policy, policy_loaded):
                         "char_end": char_end,
                         "quote": quote,
                         "quote_sha256": sha256_bytes(quote.encode("utf-8")),
+                        "version_label": version_tag,
+                        "version_year": version_year[0] if version_year else "",
                     }
                     citations.append(citation)
                     question_citations.append(citation)
@@ -1085,39 +1199,55 @@ def run(args, policy, policy_loaded):
                         "char_start": char_start, "char_end": char_end,
                         "quote": quote, "score": score, "matched_terms": matched,
                         "citation": citation["label"],
+                        "version_label": version_tag,
+                        "version_year": citation["version_year"],
                     })
                     passages.append(question_passages[-1])
                 answer_text = " ".join(
-                    "%s [%s]" % (item["quote"], item["label"])
+                    "%s [%s · version %s]" % (item["quote"], item["label"], item["version_label"])
                     for item in question_citations[:2])
+                if len(question_citations) > 2:
+                    answer_text += " Versions cited: %s." % ", ".join(
+                        "%s=%s" % (item["label"], item["version_label"])
+                        for item in question_citations[2:])
                 top_score = ranked[0][0]
                 if top_score >= policy["retrieval"].get("min_moderate_score", 3.0) and len(
                         question_passages) >= 2:
                     question_confidence = "moderate_lexical_support"
                 else:
                     question_confidence = "low_lexical_support"
+                seen_conflicts = set()
                 for i in range(len(question_passages) - 1):
                     for j in range(i + 1, len(question_passages)):
                         left, right = question_passages[i], question_passages[j]
-                        shared = {token for token in
-                                  set(left["matched_terms"]) & set(right["matched_terms"])
-                                  if len(token) >= 4 or CJK_RUN_RE.match(token)}
-                        left_numbers = NUM_RE.findall(left["quote"])
-                        right_numbers = NUM_RE.findall(right["quote"])
-                        measured = shared_measurement_conflict(left["quote"], right["quote"])
-                        if shared and measured:
+                        if left["file"] == right["file"]:
+                            continue
+                        for found in measurement_conflicts(left["quote"], right["quote"]):
+                            key = (question["id"], found["quantity"], found["unit"],
+                                   left["file"], right["file"], found["left_value"],
+                                   found["right_value"], found["resolution"])
+                            if key in seen_conflicts:
+                                continue
+                            seen_conflicts.add(key)
                             conflicts.append({
                                 "question_id": question["id"],
-                                "terms": sorted(shared)[:4],
-                                "unit": measured["unit"],
-                                "left": {"citation": left["citation"], "file": left["file"],
-                                         "values": measured["left"],
-                                         "numbers": left_numbers[:6]},
-                                "right": {"citation": right["citation"], "file": right["file"],
-                                          "values": measured["right"],
-                                          "numbers": right_numbers[:6]},
-                                "resolution": "not decided; both passages are quoted verbatim",
+                                "quantity": found["quantity"],
+                                "unit": found["unit"],
+                                "left": {"file": left["file"], "quote": left["quote"],
+                                         "value": found["left_value"]},
+                                "right": {"file": right["file"], "quote": right["quote"],
+                                          "value": found["right_value"]},
+                                "resolution": found["resolution"],
                             })
+                if wanted_years and question_passages:
+                    if not any(item.get("version_year") in wanted_years
+                               for item in question_passages):
+                        year_unmet.append({
+                            "question_id": question["id"], "question": question["text"],
+                            "wanted_years": wanted_years,
+                            "cited_versions": [item["version_label"]
+                                               for item in question_passages],
+                        })
             answers.append({
                 "question_id": question["id"], "question": question["text"],
                 "answer": answer_text, "confidence": question_confidence,
@@ -1132,6 +1262,8 @@ def run(args, policy, policy_loaded):
         elif any(item["confidence"] == "low_lexical_support" for item in answers):
             status = "partial"
         if conflicts:
+            status = "partial"
+        if year_unmet:
             status = "partial"
         if any(item.get("reason") in ("unreadable", "stat_failed") for item in skipped):
             status = "partial"
@@ -1161,7 +1293,7 @@ def run(args, policy, policy_loaded):
     for gap in gaps:
         needs_confirmation.append({
             "item": "missing_evidence", "question_id": gap["question_id"],
-            "locator": None,
+            "locator": "question:%s" % gap["question_id"],
             "reason": "no passage above threshold for terms: %s" % (
                 ", ".join(gap["missing_terms"]) or "all query terms"),
         })
@@ -1169,7 +1301,16 @@ def run(args, policy, policy_loaded):
         needs_confirmation.append({
             "item": "source_conflict", "question_id": conflict["question_id"],
             "locator": "%s | %s" % (conflict["left"]["file"], conflict["right"]["file"]),
-            "reason": "passages report different numeric values for shared terms",
+            "reason": "%s for %s (%s); both passages are quoted, no arbitration"
+                      % (conflict["resolution"], conflict["quantity"], conflict["unit"]),
+        })
+    for item in year_unmet:
+        needs_confirmation.append({
+            "item": "version_constraint_unmet", "question_id": item["question_id"],
+            "locator": "question:%s" % item["question_id"],
+            "reason": "question asks for %s but cited versions are %s"
+                      % (", ".join(item["wanted_years"]),
+                         ", ".join(item["cited_versions"]) or "none"),
         })
     for item in skipped:
         if item.get("reason", "").startswith(("unreadable", "stat_failed")):
@@ -1190,34 +1331,15 @@ def run(args, policy, policy_loaded):
     if gaps:
         uncertainty.append("Some questions had no above-threshold evidence; see evidence_gaps.")
     if conflicts:
-        uncertainty.append("Some passages report conflicting numbers; no arbitration was performed.")
+        uncertainty.append("Some passages report conflicting values or conditions; "
+                           "both sides are quoted and no arbitration was performed.")
+    if year_unmet:
+        uncertainty.append("A year-constrained question could not be answered from that year's "
+                           "documents; status is partial and cited versions are labelled.")
     if any(doc["ext"] in PDF_EXTS for doc in docs):
         uncertainty.append("PDF text extraction is heuristic; verify quotes against the PDF.")
     if not questions:
         uncertainty.append("No question was found in case.json or task.md; only an index was produced.")
-
-    # 契约键不允许留空容器：确实没发现缺口/冲突时，写一条显式的"已检查、
-    # 未发现"记录，评审能看出这是结论而不是漏产出。
-    if not gaps:
-        gaps.append({
-            "question_id": None,
-            "question": None,
-            "missing_terms": [],
-            "reason": "no_gap_detected",
-            "scope": ("every question retrieved at least one passage above the "
-                      "similarity threshold in the indexed corpus"),
-        })
-    if not conflicts:
-        conflicts.append({
-            "question_id": None,
-            "terms": [],
-            "unit": None,
-            "left": None,
-            "right": None,
-            "resolution": "no_conflict_detected",
-            "scope": ("no pair of retrieved passages for the same question reported "
-                      "different values for the same measured quantity"),
-        })
 
     stats = {
         "files_seen": len(docs) + len(duplicates) + len(skipped),
@@ -1229,9 +1351,8 @@ def run(args, policy, policy_loaded):
         "answered": sum(1 for item in answers if item["confidence"] != "no_evidence"),
         "citations": len(citations),
         "passages": len(passages),
-        "gaps": sum(1 for g in gaps if g.get("reason") != "no_gap_detected"),
-        "conflicts": sum(1 for c in conflicts
-                         if c.get("resolution") != "no_conflict_detected"),
+        "gaps": len(gaps),
+        "conflicts": len(conflicts),
         "version_groups": len(versions),
         "errors": len(errors),
     }
@@ -1306,7 +1427,7 @@ def run(args, policy, policy_loaded):
     output.setdefault("summary", summary)
     output.setdefault("run_log", [
         "entry: sk_entry.py v%s" % VERSION,
-        "input: %s" % args.input,
+        "input: %s" % Path(args.input).name,
         "indexed files: %d" % len(docs),
         "questions: %d" % len(questions),
         "status: %s" % status,
